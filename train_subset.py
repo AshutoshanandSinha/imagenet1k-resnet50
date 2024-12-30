@@ -118,11 +118,13 @@ def train_model_subset(config):
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), 
-                               lr=0.01,  # Lower learning rate for subset
+                               lr=0.01,  
                                momentum=0.9, 
                                weight_decay=1e-4)
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)  # Fewer epochs
+    # Increase epochs from 10 to 50
+    num_epochs = 50  # Changed from 10
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     # Initialize wandb for subset training
     if config['logging']['wandb_enabled']:
@@ -136,13 +138,13 @@ def train_model_subset(config):
         )
 
     # Training loop
-    for epoch in range(10):
+    for epoch in range(num_epochs):  # Changed from range(10)
         model.train()
         train_loss = 0
         correct = 0
         total = 0
         
-        with tqdm(train_loader, desc=f'Epoch {epoch+1}/10') as pbar:
+        with tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}') as pbar:  # Updated epoch display
             for images, targets in pbar:
                 images, targets = images.to(device), targets.to(device)
                 
@@ -191,7 +193,7 @@ def train_model_subset(config):
         if config['logging']['wandb_enabled']:
             wandb.log(metrics)
         
-        print(f'Epoch {epoch+1}/10:')
+        print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'Train Loss: {metrics["train_loss"]:.4f}, Train Acc: {metrics["train_acc"]:.2f}%')
         print(f'Val Loss: {metrics["val_loss"]:.4f}, Val Acc: {metrics["val_acc"]:.2f}%')
         scheduler.step()
