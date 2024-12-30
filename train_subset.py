@@ -12,6 +12,8 @@ import random
 import numpy as np
 from pathlib import Path
 from datasets.imagenet import CustomImageNet
+from torchsummary import torchsummary
+from math import floor
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -50,6 +52,64 @@ def create_subset_indices(dataset, num_classes=10, samples_per_class=100):
     
     return indices
 
+def calculate_rf(model):
+    """Calculate receptive field for ResNet50"""
+    # Initial values
+    rf = 1
+    stride = 1
+    padding = 0
+    
+    # Layer parameters for ResNet50
+    layers = [
+        # Initial conv
+        {"kernel": 7, "stride": 2, "padding": 3},
+        # MaxPool
+        {"kernel": 3, "stride": 2, "padding": 1},
+        # Conv layers in blocks (only counting 3x3 convs)
+        *[{"kernel": 3, "stride": 1, "padding": 1}] * 3,  # Layer1
+        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer2
+        *[{"kernel": 3, "stride": 1, "padding": 1}] * 3,  # Rest of Layer2
+        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer3
+        *[{"kernel": 3, "stride": 1, "padding": 1}] * 5,  # Rest of Layer3
+        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer4
+        *[{"kernel": 3, "stride": 1, "padding": 1}] * 2   # Rest of Layer4
+    ]
+    
+    for layer in layers:
+        rf = calculate_layer_rf(
+            rf, 
+            layer["kernel"], 
+            layer["stride"], 
+            layer["padding"]
+        )
+    
+    return rf
+
+def calculate_layer_rf(rf_in, kernel_size, stride, padding):
+    """Calculate receptive field after a layer"""
+    return (rf_in - 1) * stride + kernel_size
+
+def print_model_summary(model, input_size=(3, 224, 224)):
+    """Print model summary and calculations"""
+    print("\nModel Summary:")
+    print("=" * 50)
+    torchsummary.summary(model, input_size)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print("\nParameter Counts:")
+    print("=" * 50)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    
+    # Calculate receptive field
+    rf = calculate_rf(model)
+    print("\nReceptive Field Analysis:")
+    print("=" * 50)
+    print(f"Theoretical receptive field: {rf}x{rf} pixels")
+    
 def train_model_subset(config):
     # Validate dataset path
     data_path = Path(config['data']['data_path'])
@@ -113,13 +173,16 @@ def train_model_subset(config):
                           shuffle=False, 
                           num_workers=4)
 
-    # Initialize model with fewer classes
+    # Initialize model
     model = ResNet50(num_classes=10).to(device)
+    
+    # Print model summary before training
+    print_model_summary(model)
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), 
-                               lr=0.01,  
-                               momentum=0.9, 
+                               lr=0.01,
+                               momentum=0.9,
                                weight_decay=1e-4)
     
     # Increase epochs from 10 to 50
