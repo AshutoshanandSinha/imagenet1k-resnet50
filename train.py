@@ -140,6 +140,11 @@ def train_model(config):
         wandb.init(project=config['logging']['project_name'])
         wandb.config.update(config)
 
+    # Initialize best accuracy tracking
+    best_val_acc = 0.0
+    best_model_path = Path(config['training']['model_save_path'])
+    best_model_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Training loop
     for epoch in range(config['training']['epochs']):
         model.train()
@@ -183,16 +188,29 @@ def train_model(config):
                 val_total += targets.size(0)
                 val_correct += predicted.eq(targets).sum().item()
         
-        # Log metrics
+        # Calculate metrics
+        val_acc = 100. * val_correct / val_total
         metrics = {
             'epoch': epoch,
             'train_loss': train_loss/len(train_loader),
             'train_acc': 100.*correct/total,
             'val_loss': val_loss/len(val_loader),
-            'val_acc': 100.*val_correct/val_total,
+            'val_acc': val_acc,
             'learning_rate': scheduler.get_last_lr()[0]
         }
-        
+
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss/len(val_loader),
+            }, best_model_path)
+            print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+
         if config['logging']['wandb_enabled']:
             wandb.log(metrics)
         

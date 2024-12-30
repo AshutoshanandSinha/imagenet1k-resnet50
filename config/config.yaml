@@ -1,11 +1,12 @@
 # Training settings
 training:
   epochs: 100
-  batch_size: 64
+  batch_size: 128
   learning_rate: 0.1
   weight_decay: 1e-4
   momentum: 0.9
   save_freq: 5
+  model_save_path: "checkpoints/best_model.pth"
 
 # Data settings
 data:
