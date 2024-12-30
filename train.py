@@ -8,61 +8,115 @@ from models.resnet50 import ResNet50
 import wandb
 from tqdm import tqdm
 import yaml
+from pathlib import Path
+from datasets.imagenet import CustomImageNet
 
 def train_model(config):
-    # Validate dataset size
-    if config['data']['num_classes'] != 1000:
-        raise ValueError("ImageNet-1K requires num_classes=1000")
-        
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+    # Validate dataset path
+    data_path = Path(config['data']['data_path'])
+    if not (data_path / 'train').exists() or not (data_path / 'val').exists():
+        raise ValueError(f"Dataset not found at {data_path}. Please run download_dataset.py first.")
+
+    # Set device and handle multi-GPU
+    if torch.cuda.is_available() and config['hardware']['device'] == 'cuda':
+        device = torch.device('cuda')
+        if config['hardware']['multi_gpu'] and torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs!")
+            use_multi_gpu = True
+        else:
+            use_multi_gpu = False
+    else:
+        device = torch.device('cpu')
+        use_multi_gpu = False
+        print("Warning: Using CPU. Training will be slow!")
+
     # Data augmentation and normalization
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
+        transforms.RandomResizedCrop(config['data']['input_size']),
+        transforms.RandomHorizontalFlip() if config['augmentation']['random_horizontal_flip'] else None,
+        transforms.ColorJitter(
+            brightness=config['augmentation']['color_jitter']['brightness'],
+            contrast=config['augmentation']['color_jitter']['contrast'],
+            saturation=config['augmentation']['color_jitter']['saturation']
+        ),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=config['augmentation']['normalize']['mean'],
+            std=config['augmentation']['normalize']['std']
+        )
     ])
     
     val_transform = transforms.Compose([
         transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.CenterCrop(config['data']['input_size']),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=config['augmentation']['normalize']['mean'],
+            std=config['augmentation']['normalize']['std']
+        )
     ])
 
-    # Initialize datasets and dataloaders
-    train_dataset = ImageNet(root=config.data_path, split='train', transform=train_transform)
-    val_dataset = ImageNet(root=config.data_path, split='val', transform=val_transform)
+    # Create datasets
+    train_dataset = CustomImageNet(root=config['data']['data_path'], 
+                                 split='train', 
+                                 transform=train_transform)
+    val_dataset = CustomImageNet(root=config['data']['data_path'], 
+                               split='val', 
+                               transform=val_transform)
+
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=config['data']['num_workers'],
+        pin_memory=True if device.type == 'cuda' else False
+    )
     
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, 
-                            shuffle=True, num_workers=config.num_workers)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size,
-                          shuffle=False, num_workers=config.num_workers)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=config['data']['num_workers'],
+        pin_memory=True if device.type == 'cuda' else False
+    )
 
     # Initialize model
-    model = ResNet50(num_classes=1000).to(device)
-    
+    model = ResNet50(num_classes=config['data']['num_classes'])
+    if use_multi_gpu:
+        model = nn.DataParallel(model)
+    model = model.to(device)
+
+    # Create output directories
+    output_dir = Path('outputs')
+    checkpoint_dir = output_dir / 'checkpoints'
+    output_dir.mkdir(exist_ok=True)
+    checkpoint_dir.mkdir(exist_ok=True)
+
+    # Initialize wandb
+    if config['logging']['wandb_enabled']:
+        try:
+            wandb.init(project=config['logging']['project_name'], config=config)
+            wandb.watch(model)
+        except Exception as e:
+            print(f"Warning: Could not initialize wandb: {str(e)}")
+            config['logging']['wandb_enabled'] = False
+
     # Loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate,
-                               momentum=0.9, weight_decay=config.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(), lr=config['training']['learning_rate'],
+                               momentum=config['training']['momentum'], weight_decay=config['training']['weight_decay'])
     
     # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['training']['epochs'])
 
     # Training loop
-    for epoch in range(config.epochs):
+    for epoch in range(config['training']['epochs']):
         model.train()
         train_loss = 0
         correct = 0
         total = 0
         
-        with tqdm(train_loader, desc=f'Epoch {epoch+1}/{config.epochs}') as pbar:
+        with tqdm(train_loader, desc=f'Epoch {epoch+1}/{config['training']['epochs']}') as pbar:
             for images, targets in pbar:
                 images, targets = images.to(device), targets.to(device)
                 
@@ -110,7 +164,7 @@ def train_model(config):
         scheduler.step()
         
         # Save checkpoint
-        if (epoch + 1) % config.save_freq == 0:
+        if (epoch + 1) % config['training']['save_freq'] == 0:
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -129,9 +183,5 @@ if __name__ == "__main__":
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-    
-    # Initialize wandb
-    if config['logging']['wandb_enabled']:
-        wandb.init(project=config['logging']['project_name'], config=config)
     
     train_model(config) 

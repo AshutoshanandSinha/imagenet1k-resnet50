@@ -1,7 +1,7 @@
 # Training settings
 training:
   epochs: 100
-  batch_size: 256
+  batch_size: 64
   learning_rate: 0.1
   weight_decay: 1e-4
   momentum: 0.9
@@ -10,7 +10,7 @@ training:
 # Data settings
 data:
   data_path: "data/imagenet"
-  num_workers: 8
+  num_workers: 4
   input_size: 224
   num_classes: 1000  # ImageNet-1K classes
   train_samples: 1281167  # Total training samples in ImageNet-1K
@@ -37,9 +37,9 @@ augmentation:
 logging:
   project_name: "resnet50-imagenet"
   log_interval: 100
-  wandb_enabled: true
+  wandb_enabled: false
 
 # Hardware settings
 hardware:
   device: "cuda"
-  multi_gpu: true 
+  multi_gpu: false 

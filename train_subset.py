@@ -10,6 +10,8 @@ from tqdm import tqdm
 import yaml
 import random
 import numpy as np
+from pathlib import Path
+from datasets.imagenet import CustomImageNet
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -49,17 +51,29 @@ def create_subset_indices(dataset, num_classes=10, samples_per_class=100):
     return indices
 
 def train_model_subset(config):
-    set_seed(42)
+    # Validate dataset path
+    data_path = Path(config['data']['data_path'])
+    if not (data_path / 'train').exists() or not (data_path / 'val').exists():
+        raise ValueError(f"Dataset not found at {data_path}. Please run download_dataset.py first.")
+
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Data transforms (same as original)
+    print(f"Using device: {device}")
+
+    # Create transforms (same as original)
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224),
+        transforms.RandomResizedCrop(config['data']['input_size']),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
+        transforms.ColorJitter(
+            brightness=config['augmentation']['color_jitter']['brightness'],
+            contrast=config['augmentation']['color_jitter']['contrast'],
+            saturation=config['augmentation']['color_jitter']['saturation']
+        ),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=config['augmentation']['normalize']['mean'],
+            std=config['augmentation']['normalize']['std']
+        )
     ])
     
     val_transform = transforms.Compose([
@@ -70,11 +84,13 @@ def train_model_subset(config):
                            std=[0.229, 0.224, 0.225])
     ])
 
-    # Load datasets
-    train_dataset = ImageNet(root=config['data']['data_path'], split='train', 
-                           transform=train_transform)
-    val_dataset = ImageNet(root=config['data']['data_path'], split='val', 
-                          transform=val_transform)
+    # Create datasets
+    train_dataset = CustomImageNet(root=config['data']['data_path'], 
+                                 split='train', 
+                                 transform=train_transform)
+    val_dataset = CustomImageNet(root=config['data']['data_path'], 
+                               split='val', 
+                               transform=val_transform)
     
     # Create subsets
     train_indices = create_subset_indices(train_dataset, 

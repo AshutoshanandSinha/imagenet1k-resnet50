@@ -1,6 +1,6 @@
 # ResNet50 ImageNet-1K Classifier
 
-This repository contains a PyTorch implementation of ResNet50 for training on the ImageNet-1K dataset (ILSVRC2012). It includes support for both full dataset training and subset training for faster experimentation.
+This repository contains a PyTorch implementation of ResNet50 for training on the ImageNet-1K dataset (ILSVRC2012), targeting 70% top-1 accuracy. It includes support for both full dataset training and subset training for faster experimentation.
 
 ## Project Structure 
 
@@ -10,6 +10,14 @@ This repository contains a PyTorch implementation of ResNet50 for training on th
 - `download_dataset.py`: Script to download the ImageNet-1K dataset from Kaggle.
 - `requirements.txt`: List of dependencies.
 - `config/config.yaml`: Configuration file for training.
+
+## Training Goals
+
+- Target: 70% top-1 accuracy on ImageNet-1K validation set
+- Training from scratch (no pre-trained weights)
+- Expected training time: ~100 epochs
+- Hardware requirements: Multi-GPU setup recommended (8x GPUs ideal)
+- Estimated training time: 3-4 days on 8x V100 GPUs
 
 ## Setup
 
@@ -30,24 +38,45 @@ python download_dataset.py
 
 ## Configuration
 
-The `config/config.yaml` file contains all training parameters:
+The `config/config.yaml` file contains all training parameters. Key settings for achieving 70% accuracy:
 
 ```yaml
 training:
-  epochs: 100
-  batch_size: 256
-  learning_rate: 0.1
-  weight_decay: 1e-4
+  epochs: 100          # Required for target accuracy
+  batch_size: 256      # Adjust based on available GPU memory
+  learning_rate: 0.1   # Initial learning rate
+  weight_decay: 1e-4   # L2 regularization
   
 data:
   data_path: "data/imagenet"
   num_workers: 8
-  num_classes: 1000  # ImageNet-1K classes
+  num_classes: 1000    # ImageNet-1K classes
   
-logging:
-  project_name: "resnet50-imagenet"
-  wandb_enabled: true
+model:
+  architecture: "resnet50"
+  pretrained: false    # Training from scratch
 ```
+
+## Training Strategy
+
+To achieve 70% top-1 accuracy:
+
+1. **Learning Rate Schedule**:
+   - Initial LR: 0.1
+   - Cosine decay over 100 epochs
+   - Warm-up period: 5 epochs
+
+2. **Data Augmentation Pipeline**:
+   - Random resized crop (224x224)
+   - Random horizontal flip
+   - Color jitter (brightness=0.4, contrast=0.4, saturation=0.4)
+   - Normalization with ImageNet statistics
+
+3. **Optimization**:
+   - SGD optimizer with momentum (0.9)
+   - Weight decay: 1e-4
+   - Batch size: 256 per GPU
+   - Mixed precision training (FP16)
 
 ## Usage
 
@@ -107,6 +136,19 @@ Training progress is monitored through:
    - Training/validation accuracy
    - Learning rate
    - Model parameters
+
+## Expected Training Progress
+
+Typical accuracy progression:
+- 20 epochs: ~40% top-1 accuracy
+- 50 epochs: ~60% top-1 accuracy
+- 100 epochs: ~70% top-1 accuracy
+
+Monitor training through Weights & Biases dashboard for:
+- Training/validation loss curves
+- Top-1/Top-5 accuracy
+- Learning rate schedule
+- GPU utilization and throughput
 
 ## Requirements
 
