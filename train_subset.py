@@ -12,7 +12,7 @@ import random
 import numpy as np
 from pathlib import Path
 from datasets.imagenet import CustomImageNet
-from torchsummary import torchsummary
+from torchsummary import summary
 from math import floor
 
 def set_seed(seed=42):
@@ -93,7 +93,7 @@ def print_model_summary(model, input_size=(3, 224, 224)):
     """Print model summary and calculations"""
     print("\nModel Summary:")
     print("=" * 50)
-    torchsummary.summary(model, input_size)
+    summary(model, input_size)
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
