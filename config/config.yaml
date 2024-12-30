@@ -1,0 +1,45 @@
+# Training settings
+training:
+  epochs: 100
+  batch_size: 256
+  learning_rate: 0.1
+  weight_decay: 1e-4
+  momentum: 0.9
+  save_freq: 5
+
+# Data settings
+data:
+  data_path: "data/imagenet"
+  num_workers: 8
+  input_size: 224
+  num_classes: 1000  # ImageNet-1K classes
+  train_samples: 1281167  # Total training samples in ImageNet-1K
+  val_samples: 50000     # Total validation samples
+
+# Model settings
+model:
+  architecture: "resnet50"
+  pretrained: false
+
+# Augmentation settings
+augmentation:
+  random_crop: true
+  random_horizontal_flip: true
+  color_jitter:
+    brightness: 0.4
+    contrast: 0.4
+    saturation: 0.4
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+# Logging settings
+logging:
+  project_name: "resnet50-imagenet"
+  log_interval: 100
+  wandb_enabled: true
+
+# Hardware settings
+hardware:
+  device: "cuda"
+  multi_gpu: true 
