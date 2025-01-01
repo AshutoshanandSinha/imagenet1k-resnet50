@@ -1,21 +1,25 @@
 # Training settings
 training:
   epochs: 100
-  batch_size: 128
+  batch_size: 256
   learning_rate: 0.1
   weight_decay: 0.0001
   momentum: 0.9
   save_freq: 5
   model_save_path: "checkpoints/best_model.pth"
+  pin_memory: true
+  prefetch_factor: 2
 
 # Data settings
 data:
   data_path: "data/imagenet"
-  num_workers: 4
+  num_workers: 8
   input_size: 224
   num_classes: 1000  # ImageNet-1K classes
   train_samples: 1281167  # Total training samples in ImageNet-1K
   val_samples: 50000     # Total validation samples
+  train_path: "data/train"
+  val_path: "data/val"
 
 # Model settings
 model:
@@ -39,6 +43,7 @@ logging:
   project_name: "imagenet-resnet50"
   log_interval: 100
   wandb_enabled: false
+  run_name: "baseline"
 
 # Hardware settings
 hardware:

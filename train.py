@@ -140,6 +140,7 @@ def train_model(config):
         wandb.init(project=config['logging']['project_name'])
         wandb.config.update(config)
 
+
     # Initialize best accuracy tracking
     best_val_acc = 0.0
     best_model_path = Path(config['training']['model_save_path'])
