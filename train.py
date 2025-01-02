@@ -127,10 +127,12 @@ def train_model(config):
     print_model_summary(model)
     
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), 
-                               lr=config['training']['learning_rate'],
-                               momentum=config['training']['momentum'],
-                               weight_decay=config['training']['weight_decay'])
+    optimizer = torch.optim.SGD(
+        model.parameters(), 
+        lr=float(config['training']['learning_rate']),
+        momentum=float(config['training']['momentum']),
+        weight_decay=float(config['training']['weight_decay'])
+    )
     
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
                                                           T_max=config['training']['epochs'])
@@ -146,6 +148,9 @@ def train_model(config):
     best_model_path = Path(config['training']['model_save_path'])
     best_model_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Initialize gradient scaler for AMP
+    scaler = torch.amp.GradScaler()
+
     # Training loop
     for epoch in range(config['training']['epochs']):
         model.train()
@@ -158,11 +163,13 @@ def train_model(config):
                 images, targets = images.to(device), targets.to(device)
                 
                 optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs, targets)
+                with torch.cuda.amp.autocast():
+                    outputs = model(images)
+                    loss = criterion(outputs, targets)
                 
-                loss.backward()
-                optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
