@@ -12,6 +12,8 @@ from torch.amp import GradScaler, autocast
 from torchvision.models import ResNet50_Weights
 from torchsummary import torchsummary
 from tqdm import tqdm
+from lr_finder import find_optimal_lr
+from torch.optim.lr_scheduler import OneCycleLR
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -119,19 +121,50 @@ def main():
     if config['hardware']['multi_gpu']:
         model = nn.DataParallel(model)
 
-    # Define loss function and optimizer
+    # Initialize criterion and optimizer with a temporary learning rate
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(
         model.parameters(),
-        lr=config['training']['learning_rate'],
+        lr=0.1,  # Temporary LR
         momentum=config['training']['momentum'],
         weight_decay=config['training']['weight_decay']
     )
-
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    
+    # Find optimal learning rate
+    logger.info("Finding optimal learning rate...")
+    suggested_lr = find_optimal_lr(
+        model=model,
+        train_loader=train_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        num_iter=100
+    )
+    logger.info(f"Suggested learning rate: {suggested_lr:.6f}")
+    
+    # Calculate learning rate bounds
+    max_lr = suggested_lr
+    div_factor = 25  # max_lr/div_factor = initial lr
+    final_div_factor = 1e4  # max_lr/(div_factor*final_div_factor) = final lr
+    
+    # Reinitialize the optimizer with the found learning rate
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=max_lr/div_factor,
+        momentum=config['training']['momentum'],
+        weight_decay=config['training']['weight_decay']
+    )
+    
+    # Create OneCycleLR scheduler
+    scheduler = OneCycleLR(
         optimizer,
-        T_max=config['training']['epochs']
+        max_lr=max_lr,
+        epochs=config['training']['epochs'],
+        steps_per_epoch=len(train_loader),
+        pct_start=0.3,  # Percentage of training time to increase LR
+        div_factor=div_factor,
+        final_div_factor=final_div_factor,
+        anneal_strategy='cos'
     )
 
     # Create checkpoint directory
@@ -139,6 +172,9 @@ def main():
 
     # Create gradient scaler
     scaler = GradScaler()
+
+    # Add gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
     # Training loop
     best_acc = 0.0
@@ -149,19 +185,11 @@ def main():
         train_total = 0
         start_time = time.time()
 
-        # Add tqdm progress bar
         pbar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{config["training"]["epochs"]}')
         
         for batch_idx, (inputs, targets) in enumerate(pbar):
             inputs = inputs.to(device)
             targets = targets.to(device)
-            
-            # Warmup learning rate
-            if epoch < config['training']['warmup_epochs']:
-                lr_scale = min(1., (epoch * len(train_loader) + batch_idx + 1) / 
-                             (config['training']['warmup_epochs'] * len(train_loader)))
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = config['training']['learning_rate'] * lr_scale
             
             optimizer.zero_grad()
             
@@ -172,11 +200,15 @@ def main():
             
             # Backward pass with gradient scaling
             scaler.scale(loss).backward()
+            
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             scaler.step(optimizer)
             scaler.update()
             
-            # Update learning rate
-            optimizer.step()
+            # Step the scheduler (OneCycleLR is updated per step, not per epoch)
             scheduler.step()
             
             # Calculate metrics
@@ -186,7 +218,7 @@ def main():
             train_correct += predicted.eq(targets).sum().item()
 
             # Update progress bar
-            current_lr = get_lr(optimizer)
+            current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({
                 'Loss': f'{train_loss/(batch_idx+1):.3f}',
                 'Acc': f'{100.*train_correct/train_total:.2f}%',
