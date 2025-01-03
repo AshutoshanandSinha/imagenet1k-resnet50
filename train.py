@@ -8,7 +8,8 @@ from datasets.imagenet import CustomImageNet
 import yaml
 import time
 import logging
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
+from torchvision.models import ResNet50_Weights
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -85,7 +86,12 @@ def main():
     )
 
     # Create model
-    model = models.resnet50(pretrained=config['model']['pretrained'])
+    if config['model']['pretrained']:
+        weights = ResNet50_Weights.IMAGENET1K_V2
+    else:
+        weights = None
+    
+    model = models.resnet50(weights=weights)
     model = model.to(config['hardware']['device'])
 
     if config['hardware']['multi_gpu']:
@@ -110,7 +116,7 @@ def main():
     Path(config['training']['model_save_path']).parent.mkdir(parents=True, exist_ok=True)
 
     # Create gradient scaler
-    scaler = GradScaler()
+    scaler = GradScaler(device_type='cuda')
 
     # Training loop
     best_acc = 0.0
