@@ -10,6 +10,7 @@ from datasets.imagenet import CustomImageNet
 from models.resnet50 import ResNet50
 from torchsummary import summary
 from math import floor
+import math
 
 def calculate_rf(model):
     """Calculate receptive field for ResNet50"""
@@ -68,6 +69,21 @@ def print_model_summary(model, input_size=(3, 224, 224)):
     print("\nReceptive Field Analysis:")
     print("=" * 50)
     print(f"Theoretical receptive field: {rf}x{rf} pixels")
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    """Create a schedule with a learning rate that decreases following the values of the cosine function between the
+    initial lr set in the optimizer to 0, after a warmup period during which it increases linearly between 0 and the
+    initial lr set in the optimizer.
+    """
+    def lr_lambda(current_step):
+        # Warmup
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine decay
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def train_model(config):
     # Validate dataset path
@@ -128,14 +144,23 @@ def train_model(config):
     
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(
-        model.parameters(), 
-        lr=float(config['training']['learning_rate']),
-        momentum=float(config['training']['momentum']),
+        model.parameters(),
+        lr=config['training']['learning_rate'],
+        momentum=config['training']['momentum'],
         weight_decay=float(config['training']['weight_decay'])
     )
-    
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
-                                                          T_max=config['training']['epochs'])
+
+    # Calculate warmup and total steps
+    warmup_epochs = config['training']['warmup_epochs']
+    total_steps = config['training']['epochs'] * len(train_loader)
+    warmup_steps = warmup_epochs * len(train_loader)
+
+    # Initialize scheduler
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
 
     # Initialize wandb
     if config['logging']['wandb_enabled']:
@@ -150,6 +175,9 @@ def train_model(config):
 
     # Initialize gradient scaler for AMP
     scaler = torch.amp.GradScaler()
+    
+    # Add gradient clipping
+    max_grad_norm = 1.0
 
     # Training loop
     for epoch in range(config['training']['epochs']):
@@ -168,6 +196,11 @@ def train_model(config):
                     loss = criterion(outputs, targets)
                 
                 scaler.scale(loss).backward()
+                
+                # Add gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                
                 scaler.step(optimizer)
                 scaler.update()
                 
@@ -176,8 +209,16 @@ def train_model(config):
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
                 
-                pbar.set_postfix({'Loss': train_loss/(pbar.n+1), 
-                                'Acc': 100.*correct/total})
+                # Step the scheduler after each batch
+                scheduler.step()
+                
+                # Update progress bar with current learning rate
+                current_lr = scheduler.get_last_lr()[0]
+                pbar.set_postfix({
+                    'Loss': train_loss/(pbar.n+1),
+                    'Acc': 100.*correct/total,
+                    'LR': f'{current_lr:.6f}'
+                })
         
         # Validation phase
         model.eval()
@@ -225,8 +266,6 @@ def train_model(config):
         print(f'Epoch {epoch+1}/{config["training"]["epochs"]}:')
         print(f'Train Loss: {metrics["train_loss"]:.4f}, Train Acc: {metrics["train_acc"]:.2f}%')
         print(f'Val Loss: {metrics["val_loss"]:.4f}, Val Acc: {metrics["val_acc"]:.2f}%')
-        
-        scheduler.step()
 
 if __name__ == "__main__":
     with open('config/config.yaml', 'r') as f:

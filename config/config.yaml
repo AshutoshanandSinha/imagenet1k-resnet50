@@ -1,10 +1,11 @@
 # Training settings
 training:
-  epochs: 100
+  epochs: 90
   batch_size: 256
   learning_rate: 0.1
   weight_decay: 0.0001
   momentum: 0.9
+  warmup_epochs: 5
   save_freq: 5
   model_save_path: "checkpoints/best_model.pth"
   pin_memory: true
@@ -12,14 +13,14 @@ training:
 
 # Data settings
 data:
-  data_path: "data/imagenet"
+  data_path: "/data/ILSVRC/ILSVRC/Data/CLS-LOC"  # Updated path
   num_workers: 8
   input_size: 224
-  num_classes: 1000  # ImageNet-1K classes
-  train_samples: 1281167  # Total training samples in ImageNet-1K
-  val_samples: 50000     # Total validation samples
-  train_path: "data/train"
-  val_path: "data/val"
+  num_classes: 1000
+  train_samples: 1281167
+  val_samples: 50000
+  train_path: "train"
+  val_path: "val"
 
 # Model settings
 model:
@@ -48,4 +49,4 @@ logging:
 # Hardware settings
 hardware:
   device: "cuda"
-  multi_gpu: false 
+  multi_gpu: false
