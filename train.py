@@ -1,274 +1,207 @@
 import torch
 import torch.nn as nn
-import torchvision.transforms as transforms
+import torch.optim as optim
 from torch.utils.data import DataLoader
-import wandb
-from tqdm import tqdm
-import yaml
+from torchvision import transforms, models
 from pathlib import Path
 from datasets.imagenet import CustomImageNet
-from models.resnet50 import ResNet50
-from torchsummary import summary
-from math import floor
-import math
+import yaml
+import time
+import logging
+from torch.cuda.amp import GradScaler
 
-def calculate_rf(model):
-    """Calculate receptive field for ResNet50"""
-    # Initial values
-    rf = 1
-    stride = 1
-    padding = 0
-    
-    # Layer parameters for ResNet50
-    layers = [
-        # Initial conv
-        {"kernel": 7, "stride": 2, "padding": 3},
-        # MaxPool
-        {"kernel": 3, "stride": 2, "padding": 1},
-        # Conv layers in blocks (only counting 3x3 convs)
-        *[{"kernel": 3, "stride": 1, "padding": 1}] * 3,  # Layer1
-        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer2
-        *[{"kernel": 3, "stride": 1, "padding": 1}] * 3,  # Rest of Layer2
-        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer3
-        *[{"kernel": 3, "stride": 1, "padding": 1}] * 5,  # Rest of Layer3
-        {"kernel": 3, "stride": 2, "padding": 1},         # First block of Layer4
-        *[{"kernel": 3, "stride": 1, "padding": 1}] * 2   # Rest of Layer4
-    ]
-    
-    for layer in layers:
-        rf = calculate_layer_rf(
-            rf, 
-            layer["kernel"], 
-            layer["stride"], 
-            layer["padding"]
-        )
-    
-    return rf
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def calculate_layer_rf(rf_in, kernel_size, stride, padding):
-    """Calculate receptive field after a layer"""
-    return (rf_in - 1) * stride + kernel_size
-
-def print_model_summary(model, input_size=(3, 224, 224)):
-    """Print model summary and calculations"""
-    print("\nModel Summary:")
-    print("=" * 50)
-    summary(model, input_size)
-    
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    print("\nParameter Counts:")
-    print("=" * 50)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    
-    # Calculate receptive field
-    rf = calculate_rf(model)
-    print("\nReceptive Field Analysis:")
-    print("=" * 50)
-    print(f"Theoretical receptive field: {rf}x{rf} pixels")
-
-def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
-    """Create a schedule with a learning rate that decreases following the values of the cosine function between the
-    initial lr set in the optimizer to 0, after a warmup period during which it increases linearly between 0 and the
-    initial lr set in the optimizer.
-    """
-    def lr_lambda(current_step):
-        # Warmup
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        # Cosine decay
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-def train_model(config):
-    # Validate dataset path
-    data_path = Path(config['data']['data_path'])
-    if not (data_path / 'train').exists() or not (data_path / 'val').exists():
-        raise ValueError(f"Dataset not found at {data_path}. Please run download_dataset.py first.")
-
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Create transforms
+def create_transforms():
+    # Training transforms
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(config['data']['input_size']),
+        transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
-            brightness=config['augmentation']['color_jitter']['brightness'],
-            contrast=config['augmentation']['color_jitter']['contrast'],
-            saturation=config['augmentation']['color_jitter']['saturation']
+            brightness=0.4,
+            contrast=0.4,
+            saturation=0.4
         ),
         transforms.ToTensor(),
         transforms.Normalize(
-            mean=config['augmentation']['normalize']['mean'],
-            std=config['augmentation']['normalize']['std']
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
         )
     ])
-    
+
+    # Validation transforms
     val_transform = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
 
-    # Create datasets and dataloaders
-    train_dataset = CustomImageNet(root=config['data']['data_path'], 
-                                 split='train', 
-                                 transform=train_transform)
-    val_dataset = CustomImageNet(root=config['data']['data_path'], 
-                               split='val', 
-                               transform=val_transform)
-    
-    train_loader = DataLoader(train_dataset, 
-                            batch_size=config['training']['batch_size'],
-                            shuffle=True, 
-                            num_workers=config['data']['num_workers'])
-    val_loader = DataLoader(val_dataset, 
-                          batch_size=config['training']['batch_size'], 
-                          shuffle=False, 
-                          num_workers=config['data']['num_workers'])
+    return train_transform, val_transform
 
-    # Initialize model
-    model = ResNet50(num_classes=1000).to(device)
-    
-    # Print model summary before training
-    print_model_summary(model)
-    
+def main():
+    # Load config
+    with open('config/config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+
+    # Create transforms
+    train_transform, val_transform = create_transforms()
+
+    # Create datasets
+    train_dataset = CustomImageNet(
+        root=config['data']['data_path'],
+        split='train',
+        transform=train_transform
+    )
+
+    val_dataset = CustomImageNet(
+        root=config['data']['data_path'],
+        split='val',
+        transform=val_transform
+    )
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=config['data']['num_workers'],
+        pin_memory=config['training']['pin_memory'],
+        prefetch_factor=config['training']['prefetch_factor']
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=config['data']['num_workers'],
+        pin_memory=config['training']['pin_memory'],
+        prefetch_factor=config['training']['prefetch_factor']
+    )
+
+    # Create model
+    model = models.resnet50(pretrained=config['model']['pretrained'])
+    model = model.to(config['hardware']['device'])
+
+    if config['hardware']['multi_gpu']:
+        model = nn.DataParallel(model)
+
+    # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(
+    optimizer = optim.SGD(
         model.parameters(),
         lr=config['training']['learning_rate'],
         momentum=config['training']['momentum'],
-        weight_decay=float(config['training']['weight_decay'])
+        weight_decay=config['training']['weight_decay']
     )
 
-    # Calculate warmup and total steps
-    warmup_epochs = config['training']['warmup_epochs']
-    total_steps = config['training']['epochs'] * len(train_loader)
-    warmup_steps = warmup_epochs * len(train_loader)
-
-    # Initialize scheduler
-    scheduler = get_cosine_schedule_with_warmup(
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+        T_max=config['training']['epochs']
     )
 
-    # Initialize wandb
-    if config['logging']['wandb_enabled']:
-        wandb.init(project=config['logging']['project_name'])
-        wandb.config.update(config)
+    # Create checkpoint directory
+    Path(config['training']['model_save_path']).parent.mkdir(parents=True, exist_ok=True)
 
-
-    # Initialize best accuracy tracking
-    best_val_acc = 0.0
-    best_model_path = Path(config['training']['model_save_path'])
-    best_model_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Initialize gradient scaler for AMP
-    scaler = torch.amp.GradScaler()
-    
-    # Add gradient clipping
-    max_grad_norm = 1.0
+    # Create gradient scaler
+    scaler = GradScaler()
 
     # Training loop
+    best_acc = 0.0
     for epoch in range(config['training']['epochs']):
         model.train()
-        train_loss = 0
-        correct = 0
-        total = 0
-        
-        with tqdm(train_loader, desc=f'Epoch {epoch+1}/{config["training"]["epochs"]}') as pbar:
-            for images, targets in pbar:
-                images, targets = images.to(device), targets.to(device)
-                
-                optimizer.zero_grad()
-                with torch.cuda.amp.autocast():
-                    outputs = model(images)
-                    loss = criterion(outputs, targets)
-                
-                scaler.scale(loss).backward()
-                
-                # Add gradient clipping
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                
-                scaler.step(optimizer)
-                scaler.update()
-                
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-                
-                # Step the scheduler after each batch
-                scheduler.step()
-                
-                # Update progress bar with current learning rate
-                current_lr = scheduler.get_last_lr()[0]
-                pbar.set_postfix({
-                    'Loss': train_loss/(pbar.n+1),
-                    'Acc': 100.*correct/total,
-                    'LR': f'{current_lr:.6f}'
-                })
-        
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        start_time = time.time()
+
+        for batch_idx, (inputs, targets) in enumerate(train_loader):
+            inputs = inputs.to(config['hardware']['device'])
+            targets = targets.to(config['hardware']['device'])
+            
+            # Warmup learning rate
+            if epoch < config['training']['warmup_epochs']:
+                lr_scale = min(1., (epoch * len(train_loader) + batch_idx + 1) / 
+                             (config['training']['warmup_epochs'] * len(train_loader)))
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = config['training']['learning_rate'] * lr_scale
+            
+            optimizer.zero_grad()
+            
+            # Forward pass with mixed precision
+            with torch.amp.autocast(device_type='cuda'):
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+            
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # Update learning rate
+            optimizer.step()
+            scheduler.step()
+            
+            # Calculate metrics
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += targets.size(0)
+            train_correct += predicted.eq(targets).sum().item()
+
+            if (batch_idx + 1) % config['logging']['log_interval'] == 0:
+                current_lr = get_lr(optimizer)
+                logger.info(f'Epoch: {epoch + 1}/{config["training"]["epochs"]} | '
+                          f'Batch: {batch_idx + 1}/{len(train_loader)} | '
+                          f'Loss: {train_loss/(batch_idx+1):.3f} | '
+                          f'Acc: {100.*train_correct/train_total:.2f}% | '
+                          f'LR: {current_lr:.6f}')
+
+        epoch_time = time.time() - start_time
+        logger.info(f'Epoch {epoch + 1} training completed in {epoch_time:.2f}s')
+
         # Validation phase
         model.eval()
-        val_loss = 0
+        val_loss = 0.0
         val_correct = 0
         val_total = 0
-        
+
         with torch.no_grad():
-            for images, targets in val_loader:
-                images, targets = images.to(device), targets.to(device)
-                outputs = model(images)
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(config['hardware']['device']), targets.to(config['hardware']['device'])
+                outputs = model(inputs)
                 loss = criterion(outputs, targets)
-                
+
                 val_loss += loss.item()
                 _, predicted = outputs.max(1)
                 val_total += targets.size(0)
                 val_correct += predicted.eq(targets).sum().item()
-        
-        # Calculate metrics
-        val_acc = 100. * val_correct / val_total
-        metrics = {
-            'epoch': epoch,
-            'train_loss': train_loss/len(train_loader),
-            'train_acc': 100.*correct/total,
-            'val_loss': val_loss/len(val_loader),
-            'val_acc': val_acc,
-            'learning_rate': scheduler.get_last_lr()[0]
-        }
 
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Calculate accuracy
+        val_acc = 100. * val_correct / val_total
+
+        logger.info(f'Validation Loss: {val_loss/len(val_loader):.3f} | '
+                   f'Validation Acc: {val_acc:.2f}%')
+
+        # Save checkpoint if validation accuracy improves
+        if val_acc > best_acc:
+            logger.info(f'Validation accuracy improved from {best_acc:.2f} to {val_acc:.2f}')
+            best_acc = val_acc
             torch.save({
-                'epoch': epoch,
+                'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss/len(val_loader),
-            }, best_model_path)
-            print(f'New best model saved with validation accuracy: {val_acc:.2f}%')
+                'best_acc': best_acc,
+            }, config['training']['model_save_path'])
 
-        if config['logging']['wandb_enabled']:
-            wandb.log(metrics)
-        
-        print(f'Epoch {epoch+1}/{config["training"]["epochs"]}:')
-        print(f'Train Loss: {metrics["train_loss"]:.4f}, Train Acc: {metrics["train_acc"]:.2f}%')
-        print(f'Val Loss: {metrics["val_loss"]:.4f}, Val Acc: {metrics["val_acc"]:.2f}%')
-
-if __name__ == "__main__":
-    with open('config/config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    
-    train_model(config) 
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        logger.exception("Training failed with exception")
+        raise
